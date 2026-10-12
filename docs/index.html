@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Amulet Camera</title>
+<meta name="description" content="Photograph a small amulet and cut it out from its background, on the phone.">
+<meta name="theme-color" content="#14110d">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+:root{--bg:#14110d;--panel:#211c16;--line:#3a3127;--ink:#f6efe4;--dim:#c9bba6;--gold:#f2c14e;--gold-ink:#000;--bad:#ff8a7a}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:20px/1.4 system-ui,-apple-system,"Noto Sans Thai",sans-serif}
+main{max-width:720px;margin:0 auto;padding:16px 16px 96px}
+h1{font-size:28px;margin:8px 0 4px}
+h1 small{display:block;font-size:18px;color:var(--dim);font-weight:400}
+.row{display:flex;gap:12px;flex-wrap:wrap}
+button,.btn{appearance:none;border:0;border-radius:14px;padding:16px 18px;font:inherit;font-weight:700;cursor:pointer;min-height:60px}
+.big{flex:1 1 200px;background:var(--gold);color:var(--gold-ink);font-size:22px}
+.plain{background:var(--panel);color:var(--ink);border:2px solid var(--line)}
+.plain[aria-pressed=true]{border-color:var(--gold)}
+input[type=file]{display:none}
+#status{margin:16px 0;color:var(--dim);min-height:1.4em}
+progress{width:100%;height:16px;accent-color:var(--gold)}
+.card{background:var(--panel);border:2px solid var(--line);border-radius:18px;padding:12px;margin:16px 0}
+.stage{border-radius:12px;overflow:hidden;display:flex;justify-content:center;align-items:center;min-height:200px;cursor:zoom-in}
+.stage canvas{max-width:100%;max-height:70vh;display:block}
+.bg-check{background:repeating-conic-gradient(#888 0 25%,#bbb 0 50%) 0 0/24px 24px}
+.bg-white{background:#fff}.bg-black{background:#000}
+.meta{color:var(--dim);font-size:17px;margin:8px 2px}
+.card .row button{flex:1 1 140px}
+.err{color:var(--bad)}
+#zoom{position:fixed;inset:0;background:#000;display:none;overflow:auto;z-index:9;touch-action:pan-x pan-y pinch-zoom}
+#zoom canvas{display:block;max-width:none}
+#zoom button{position:fixed;top:12px;right:12px;background:var(--gold);color:#000}
+details{margin:20px 0;color:var(--dim)}
+summary{cursor:pointer;color:var(--ink);font-weight:700}
+</style>
+</head>
+<body>
+<main>
+<h1>Amulet Camera <small>กล้องพระ · ถ่ายแล้วตัดพื้นหลัง</small></h1>
+
+<div class="row" style="margin-top:16px">
+  <label class="btn big" for="shoot" role="button">📷 Take photo · ถ่าย</label>
+  <label class="btn big" for="pick" role="button">🖼 Choose photos · เลือก</label>
+</div>
+<input id="shoot" type="file" accept="image/*" capture="environment">
+<input id="pick" type="file" accept="image/*" multiple>
+
+<div id="status"></div>
+<progress id="bar" hidden></progress>
+<div id="out"></div>
+
+<details>
+<summary>Sharper pictures · ถ่ายให้ชัด</summary>
+<p>Plain sheet behind the amulet, a colour unlike it. Daylight from a window, flash off. Hold the phone 10–15 cm away, or use the camera's macro or 2× lens and fill the frame. Tap the amulet on the screen to focus, then wait a second before the shot.</p>
+<p>The first cutout downloads the cutting model (about 45 MB) once; Wi‑Fi helps.</p>
+</details>
+</main>
+
+<div id="zoom"><button type="button" id="zoomClose">✕ Close</button></div>
+
+<script type="module">
+const T = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1';
+const Q = new URLSearchParams(location.search);
+const M = { id: 'onnx-community/ISNet-ONNX', gpu: 'fp16', cpu: 'uint8' }; // ISNet (DIS), picked over ormbg and BiRefNet_lite on her photos 2026-10-12
+const SIZE = 1024;          // model input
+const REFINE_MAX = 2048;    // guided filter works at most this many px on the long side
+
+const $ = s => document.querySelector(s);
+const status = (t, cls) => { $('#status').textContent = t; $('#status').className = cls || ''; };
+const bar = $('#bar');
+
+let tf, model, loading, gpuFailed = false;
+async function load() {
+  if (model) return;
+  if (loading) return loading;
+  loading = (async () => {
+    tf = await import(T);
+    tf.env.allowLocalModels = false;
+    const files = {};
+    const progress_callback = p => {
+      if (p.status === 'progress' && p.total) {
+        files[p.file] = [p.loaded, p.total];
+        const v = Object.values(files), l = v.reduce((a, x) => a + x[0], 0), t = v.reduce((a, x) => a + x[1], 0);
+        bar.hidden = false; bar.max = t; bar.value = l;
+        status(`Getting the cutting model · ${Math.round(l / 1e6)} of ${Math.round(t / 1e6)} MB`);
+      }
+    };
+    const want = new URLSearchParams(location.search).get('dev');
+    const tries = want === 'wasm' || !navigator.gpu || gpuFailed ? [['wasm', M.cpu]] : [['webgpu', M.gpu], ['wasm', M.cpu]];
+    let lastErr;
+    for (const [device, dtype] of tries) {
+      try {
+        model = await tf.pipeline('background-removal', M.id, { device, dtype, progress_callback }); model._dev = device;
+        if (device === 'webgpu') await predict(canvasOf(SIZE, SIZE)); // some phone GPUs load the model and fail on the first run
+        break;
+      } catch (e) { lastErr = e; console.warn(device, e); if (device === 'webgpu') gpuFailed = true; await model?.dispose?.(); model = null; }
+    }
+    bar.hidden = true;
+    if (!model) throw lastErr;
+  })();
+  try { await loading; } finally { loading = null; }
+}
+
+// run the model on a canvas → Float32Array alpha, SIZE×SIZE, 0..1
+async function predict(canvas) {
+  const r = await model(tf.RawImage.fromCanvas(canvas)), img = Array.isArray(r) ? r[0] : r;
+  const d = img.data, ch = img.channels, a = new Float32Array(img.width * img.height);
+  for (let i = 0; i < a.length; i++) a[i] = d[i * ch + ch - 1] / 255;
+  return a;
+}
+
+function canvasOf(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+
+// bounding box of alpha > t on an n×n grid, null if empty
+function bbox(a, n, t = 0.5) {
+  let x0 = n, y0 = n, x1 = -1, y1 = -1;
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) if (a[y * n + x] > t) {
+    if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+  }
+  return x1 < 0 ? null : { x0, y0, x1: x1 + 1, y1: y1 + 1 };
+}
+
+// box filter, radius r, on w×h Float32Array (running sums, two passes)
+function box(src, w, h, r) {
+  const tmp = new Float32Array(w * h), out = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const o = y * w; let s = 0;
+    for (let x = -r; x <= r; x++) s += src[o + Math.min(w - 1, Math.max(0, x))];
+    for (let x = 0; x < w; x++) {
+      tmp[o + x] = s;
+      s += src[o + Math.min(w - 1, x + r + 1)] - src[o + Math.max(0, x - r)];
+    }
+  }
+  const k = 1 / ((2 * r + 1) * (2 * r + 1));
+  for (let x = 0; x < w; x++) {
+    let s = 0;
+    for (let y = -r; y <= r; y++) s += tmp[Math.min(h - 1, Math.max(0, y)) * w + x];
+    for (let y = 0; y < h; y++) {
+      out[y * w + x] = s * k;
+      s += tmp[Math.min(h - 1, y + r + 1) * w + x] - tmp[Math.max(0, y - r) * w + x];
+    }
+  }
+  return out;
+}
+
+// guided filter (He, Sun, Tang): pulls the soft mask p onto the edges of grey image I
+function guided(I, p, w, h, r, eps) {
+  const n = w * h, Ip = new Float32Array(n), II = new Float32Array(n);
+  for (let i = 0; i < n; i++) { Ip[i] = I[i] * p[i]; II[i] = I[i] * I[i]; }
+  const mI = box(I, w, h, r), mp = box(p, w, h, r), mIp = box(Ip, w, h, r), mII = box(II, w, h, r);
+  const A = new Float32Array(n), B = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const cov = mIp[i] - mI[i] * mp[i], v = mII[i] - mI[i] * mI[i];
+    A[i] = cov / (v + eps); B[i] = mp[i] - A[i] * mI[i];
+  }
+  const mA = box(A, w, h, r), mB = box(B, w, h, r), q = new Float32Array(n);
+  for (let i = 0; i < n; i++) q[i] = Math.min(1, Math.max(0, mA[i] * I[i] + mB[i]));
+  return q;
+}
+
+// draw a float alpha grid (gw×gh) stretched over a w×h canvas, bilinear via the browser
+function alphaCanvas(a, gw, gh, w, h) {
+  const g = canvasOf(gw, gh), gx = g.getContext('2d'), id = gx.createImageData(gw, gh);
+  for (let i = 0; i < a.length; i++) { const v = a[i] * 255; id.data[i * 4 + 3] = v; }
+  gx.putImageData(id, 0, 0);
+  const c = canvasOf(w, h), cx = c.getContext('2d');
+  cx.imageSmoothingQuality = 'high'; cx.drawImage(g, 0, 0, w, h);
+  return c;
+}
+
+async function cutout(file) {
+  const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  const W = bmp.width, H = bmp.height;
+
+  // pass 1: whole frame, to find the amulet
+  const c1 = canvasOf(SIZE, SIZE); c1.getContext('2d').drawImage(bmp, 0, 0, SIZE, SIZE);
+  const a1 = await predict(c1);
+  const b = bbox(a1, SIZE);
+  if (!b) throw new Error('No object found in this picture.');
+
+  // crop around it with a margin, in full-resolution pixels
+  const sx = W / SIZE, sy = H / SIZE;
+  let x0 = b.x0 * sx, y0 = b.y0 * sy, x1 = b.x1 * sx, y1 = b.y1 * sy;
+  const m = 0.08 * Math.max(x1 - x0, y1 - y0);
+  x0 = Math.max(0, Math.floor(x0 - m)); y0 = Math.max(0, Math.floor(y0 - m));
+  x1 = Math.min(W, Math.ceil(x1 + m)); y1 = Math.min(H, Math.ceil(y1 + m));
+  const cw = x1 - x0, ch = y1 - y0;
+
+  // pass 2: the crop alone, so the amulet fills the model's view
+  const c2 = canvasOf(SIZE, SIZE); c2.getContext('2d').drawImage(bmp, x0, y0, cw, ch, 0, 0, SIZE, SIZE);
+  const a2 = await predict(c2);
+
+  // refine on edges at up to REFINE_MAX px
+  const k = Math.min(1, REFINE_MAX / Math.max(cw, ch));
+  const rw = Math.round(cw * k), rh = Math.round(ch * k);
+  const rc = canvasOf(rw, rh), rx = rc.getContext('2d', { willReadFrequently: true });
+  rx.drawImage(bmp, x0, y0, cw, ch, 0, 0, rw, rh);
+  const px = rx.getImageData(0, 0, rw, rh).data;
+  const I = new Float32Array(rw * rh);
+  for (let i = 0; i < I.length; i++) I[i] = (0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2]) / 255;
+  const pc = alphaCanvas(a2, SIZE, SIZE, rw, rh);
+  const pd = pc.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, rw, rh).data;
+  const p = new Float32Array(rw * rh);
+  for (let i = 0; i < p.length; i++) p[i] = pd[i * 4 + 3] / 255;
+  const r = Math.max(2, Math.round(Math.max(rw, rh) / 400));
+  const q = guided(I, p, rw, rh, r, 1e-4);
+  // keep the model's sure inside and sure outside; let the filter decide the rim
+  for (let i = 0; i < q.length; i++) { if (p[i] > 0.97) q[i] = 1; else if (p[i] < 0.03) q[i] = 0; }
+
+  // full-resolution cutout
+  const out = canvasOf(cw, ch), ox = out.getContext('2d');
+  ox.drawImage(bmp, x0, y0, cw, ch, 0, 0, cw, ch);
+  ox.globalCompositeOperation = 'destination-in';
+  ox.drawImage(alphaCanvas(q, rw, rh, cw, ch), 0, 0);
+  ox.globalCompositeOperation = 'source-over';
+  bmp.close();
+  return { canvas: out, W, H };
+}
+
+const blobOf = (c, type, q) => new Promise(r => c.toBlob(r, type, q));
+function onWhite(c) { const w = canvasOf(c.width, c.height), x = w.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, w.width, w.height); x.drawImage(c, 0, 0); return w; }
+function save(blob, name) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); }
+const stamp = () => new Date().toISOString().replace(/[-:]/g, '').slice(0, 15).replace('T', '-');
+
+function card(file) {
+  const el = document.createElement('div'); el.className = 'card';
+  el.innerHTML = `<div class="stage bg-check"></div><div class="meta">Cutting… · กำลังตัด…</div>`;
+  $('#out').prepend(el);
+  return el;
+}
+
+function fill(el, file, res) {
+  const name = `amulet-${stamp()}`;
+  const stage = el.querySelector('.stage');
+  stage.innerHTML = ''; stage.append(res.canvas);
+  stage.onclick = () => openZoom(res.canvas, stage.className);
+  el.querySelector('.meta').textContent = `${res.canvas.width} × ${res.canvas.height} px, from a ${res.W} × ${res.H} photo`;
+  const row = document.createElement('div'); row.className = 'row';
+  const b = (label, fn, cls = 'plain') => { const x = document.createElement('button'); x.type = 'button'; x.className = cls; x.textContent = label; x.onclick = fn; row.append(x); return x; };
+  const backs = ['bg-check', 'bg-white', 'bg-black'];
+  b('Background · พื้น', () => { const i = (backs.indexOf(stage.classList[1]) + 1) % 3; stage.className = 'stage ' + backs[i]; });
+  b('Share · แชร์', async () => {
+    const f = new File([await blobOf(res.canvas, 'image/png')], name + '.png', { type: 'image/png' });
+    if (navigator.canShare?.({ files: [f] })) navigator.share({ files: [f] }).catch(() => {}); else save(f, f.name);
+  }, 'big');
+  b('Save PNG', async () => save(await blobOf(res.canvas, 'image/png'), name + '.png'));
+  b('Save on white', async () => save(await blobOf(onWhite(res.canvas), 'image/jpeg', 0.95), name + '-white.jpg'));
+  b('Save original', () => save(file, name + '-original.' + (file.type.split('/')[1] || 'jpg')));
+  b('Remove · ลบ', () => el.remove());
+  el.append(row);
+}
+
+function openZoom(c, cls) {
+  const z = $('#zoom'); z.querySelectorAll('canvas').forEach(x => x.remove());
+  const copy = canvasOf(c.width, c.height); copy.getContext('2d').drawImage(c, 0, 0);
+  z.className = cls.replace('stage', ''); z.append(copy); z.style.display = 'block';
+}
+$('#zoomClose').onclick = () => { $('#zoom').style.display = 'none'; };
+
+let queue = Promise.resolve();
+function take(files) {
+  for (const f of files) {
+    const el = card(f);
+    queue = queue.then(async () => {
+      try {
+        if (!model) status('Loading the cutting model · กำลังโหลด…');
+        await load();
+        status(`Cutting · ${model._dev === 'webgpu' ? 'GPU' : 'CPU'}`);
+        const t = performance.now();
+        const res = await cutout(f);
+        fill(el, f, res);
+        status(`Cut in ${((performance.now() - t) / 1000).toFixed(1)} s`);
+      } catch (e) {
+        console.error(e);
+        el.querySelector('.meta').textContent = 'Could not cut this one: ' + (e.message || e);
+        el.querySelector('.meta').className = 'meta err';
+        status('');
+      }
+    });
+  }
+}
+for (const id of ['#shoot', '#pick']) $(id).onchange = e => { take([...e.target.files]); e.target.value = ''; };
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+window.__take = take; // test hook
+</script>
+</body>
+</html>
