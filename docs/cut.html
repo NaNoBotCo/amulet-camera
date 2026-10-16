@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Amulet Camera cutter</title>
+<meta name="robots" content="noindex">
+</head>
+<body>
+<script type="module">
+// The cutter for sites.motdang.net's builder, which frames this page (its own security rules keep the
+// model and its library off the builder's origin). A photo comes in by postMessage; the amulet cut
+// out and laid on white comes back as a JPEG.
+//   in:  { type: 'cut', id, blob }
+//   out: { type: 'ready' } · { type: 'progress', loaded, total } · { type: 'done', id, blob, w, h, dev } · { type: 'fail', id, error }
+import { load, cutout, device } from './cutout.mjs';
+
+const PARENTS = ['https://sites.motdang.net', 'http://127.0.0.1:8790', 'http://localhost:8790', 'https://amulet.test'];
+let parentOrigin = null;
+const send = msg => parentOrigin && parent.postMessage(msg, parentOrigin);
+
+let queue = Promise.resolve();
+addEventListener('message', e => {
+  if (!PARENTS.includes(e.origin) || e.source !== parent || e.data?.type !== 'cut') return;
+  parentOrigin = e.origin;
+  const { id, blob } = e.data;
+  queue = queue.then(async () => {
+    try {
+      await load((loaded, total) => send({ type: 'progress', loaded, total }));
+      const { canvas } = await cutout(blob);
+      const w = document.createElement('canvas'); w.width = canvas.width; w.height = canvas.height;
+      const x = w.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, w.width, w.height); x.drawImage(canvas, 0, 0);
+      const out = await new Promise(r => w.toBlob(r, 'image/jpeg', 0.92));
+      send({ type: 'done', id, blob: out, w: w.width, h: w.height, dev: device() });
+    } catch (err) {
+      console.error(err);
+      send({ type: 'fail', id, error: String(err?.message || err) });
+    }
+  });
+});
+for (const o of PARENTS) try { parent.postMessage({ type: 'ready' }, o); } catch {}
+</script>
+</body>
+</html>
