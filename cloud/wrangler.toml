@@ -1,0 +1,10 @@
+# Amulet Camera's private cloud copy. Deploy from this folder: npx wrangler deploy
+# Secret KEY = ~/.tokens/AMULET_CAMERA_KEY (the phone is linked by opening the app with #link=<KEY>)
+name = "amulet-camera-cloud"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[[r2_buckets]]
+binding = "PHOTOS"
+bucket_name = "amulet-camera-photos"

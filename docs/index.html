@@ -43,6 +43,9 @@ progress{width:100%;height:16px;accent-color:var(--gold)}
 .meta{color:var(--dim);font-size:17px;margin:8px 2px}
 .card .row button{flex:1 1 140px}
 .err{color:var(--bad)}
+.cloud{margin-top:0}
+.more{margin:12px 2px 0}
+.more .row{margin-top:12px}
 #zoom{position:fixed;inset:0;background:#000;display:none;overflow:auto;z-index:9;touch-action:pan-x pan-y pinch-zoom}
 #zoom canvas{display:block;max-width:none}
 #zoom button{position:fixed;top:12px;right:12px;background:var(--gold);color:#000}
@@ -253,29 +256,110 @@ async function tx(mode, fn) {
     t.oncomplete = () => ok(r.result); t.onerror = () => no(t.error); t.onabort = () => no(t.error);
   });
 }
-const keep = shot => tx('readwrite', s => s.put(shot));
+const live = new Map();     // id → shot, for every card on screen; a removed shot is never written back
+const keep = shot => live.has(shot.id) ? tx('readwrite', s => s.put(shot)) : Promise.resolve();
 const forget = id => tx('readwrite', s => s.delete(id));
 const kept = () => tx('readonly', s => s.getAll());
 navigator.storage?.persist?.().catch(() => {});
 
-function card() {
-  const el = document.createElement('div'); el.className = 'card';
-  el.innerHTML = `<div class="stage bg-check"></div><div class="meta">Cutting… · กำลังตัด…</div>`;
+// private cloud copy, for her linked phone only: opening the app once with #link=<key> links it
+const CLOUD = 'https://amulet-camera-cloud.nanobotco.workers.dev';
+if (location.hash.startsWith('#link=')) {
+  try { localStorage.setItem('amulet-camera-link', location.hash.slice(6)); } catch {}
+  history.replaceState(null, '', location.pathname + location.search);
+}
+const cloudKey = () => { try { return localStorage.getItem('amulet-camera-link'); } catch { return null; } };
+
+// a 1600 px copy for Google Lens
+async function lensJpeg(blob) {
+  const b = await createImageBitmap(blob, { imageOrientation: 'from-image', resizeWidth: 1600, resizeQuality: 'high' });
+  const c = canvasOf(b.width, b.height); c.getContext('2d').drawImage(b, 0, 0); b.close();
+  return blobOf(c, 'image/jpeg', 0.9);
+}
+async function put(shot, part) {
+  const body = part === 'photo' ? shot.photo : part === 'cut' ? shot.cut : await lensJpeg(shot.photo);
+  const r = await fetch(`${CLOUD}/p/${shot.id}/${part}`, { method: 'PUT', body,
+    headers: { 'X-Key': cloudKey(), 'Content-Type': body.type, 'X-Name': shot.name } });
+  if (!r.ok) throw new Error('cloud ' + r.status);
+  shot.up = { ...shot.up, [part]: true };
+  await keep(shot); mark(shot);
+}
+let syncing = false;
+async function sync() {
+  if (!cloudKey() || syncing || !navigator.onLine) return;
+  syncing = true;
+  try {
+    for (const shot of [...live.values()])
+      for (const part of ['photo', 'lens', 'cut'])
+        if (live.has(shot.id) && !shot.up?.[part] && (part !== 'cut' || shot.cut)) await put(shot, part);
+  } catch (e) { console.warn(e); }
+  finally { syncing = false; }
+}
+addEventListener('online', sync);
+setInterval(sync, 30000);
+
+function mark(shot) {
+  const el = live.get(shot.id) && document.getElementById('c-' + shot.id); if (!el || !cloudKey()) return;
+  const done = shot.up?.photo && shot.up?.lens && (!shot.cut || shot.up?.cut);
+  el.querySelector('.cloud').textContent = done ? '☁️ In your cloud · สำรองแล้ว' : '☁️ Waiting for signal to back up · รอสำรอง';
+}
+
+function card(shot) {
+  const el = document.createElement('div'); el.className = 'card'; el.id = 'c-' + shot.id;
+  el.innerHTML = `<div class="stage bg-check"></div><div class="meta">Cutting… · กำลังตัด…</div><div class="meta cloud"></div>`;
   $('#out').prepend(el);
   return el;
 }
 
+// the main buttons in a row, the rest folded under More
 function buttons(el) {
-  el.querySelector('.row')?.remove();
-  const row = document.createElement('div'); row.className = 'row'; el.append(row);
-  return (label, fn, cls = 'plain') => { const x = document.createElement('button'); x.type = 'button'; x.className = cls; x.textContent = label; x.onclick = fn; row.append(x); return x; };
+  el.querySelectorAll('.row,.more').forEach(x => x.remove());
+  const row = document.createElement('div'); row.className = 'row';
+  const more = document.createElement('details'); more.className = 'more';
+  more.innerHTML = '<summary>More · เพิ่มเติม</summary><div class="row"></div>';
+  el.append(row, more);
+  const maker = box => (label, fn, cls = 'plain') => { const x = document.createElement('button'); x.type = 'button'; x.className = cls; x.textContent = label; x.onclick = fn; box.append(x); return x; };
+  return [maker(row), maker(more.querySelector('.row'))];
 }
 const ext = shot => shot.photo.type.split('/')[1] || 'jpg';
+function share(f) { if (navigator.canShare?.({ files: [f] })) return navigator.share({ files: [f] }).catch(() => {}); save(f, f.name); }
 
 async function drop(el, shot) {
-  if (!confirm('Remove this photo from the phone? · ลบรูปนี้ออกจากเครื่อง?')) return;
+  if (!confirm('Remove from this phone? · ลบออกจากเครื่อง?' + (cloudKey() ? '\nThe cloud copy stays. · สำเนาในคลาวด์ยังอยู่' : ''))) return;
+  live.delete(shot.id);
   await forget(shot.id).catch(console.error);
   el.remove();
+}
+
+// Search: Google Lens on the photo, through a signed link to the cloud copy; with no link or signal, the share sheet (Lens is in it)
+async function search(shot) {
+  if (!cloudKey() || !navigator.onLine) return share(new File([shot.photo], shot.name + '.' + ext(shot), { type: shot.photo.type }));
+  const w = window.open('about:blank', '_blank');
+  try {
+    status('Opening Google Lens · กำลังเปิด…');
+    if (!shot.up?.lens) await put(shot, 'lens');
+    const r = await fetch(`${CLOUD}/sign/${shot.id}`, { method: 'POST', headers: { 'X-Key': cloudKey() } });
+    const lens = 'https://lens.google.com/uploadbyurl?url=' + encodeURIComponent((await r.json()).url);
+    if (w) w.location = lens; else location.href = lens;
+    status('');
+  } catch (e) { console.warn(e); w?.close(); status('Search needs a signal · ต้องใช้เน็ต', 'err'); }
+}
+
+// Price: eBay sold listings for the words she gives
+function price() {
+  const words = prompt('Price check on eBay sold listings. Words? · คำค้นหา\ne.g. luang phor thuad', '');
+  if (words) open('https://www.ebay.com/sch/i.html?' + new URLSearchParams({ _nkw: 'thai amulet ' + words, LH_Sold: 1, LH_Complete: 1 }), '_blank');
+}
+
+// Post: the picture on white to the share sheet (Facebook, then the group), caption on the clipboard
+async function post(shot, canvas) {
+  const line = prompt('What is it, and the price? · พระอะไร ราคาเท่าไร\ne.g. หลวงพ่อทวด ฿1,500', '');
+  if (line === null) return;
+  const text = `${line ? line.trim() + '\n' : ''}ให้เช่า · ทักแชทได้เลย\nThai amulet, message me.\n#พระเครื่อง #thaiamulet`;
+  try { await navigator.clipboard.writeText(text); } catch {}
+  const img = canvas ? await blobOf(onWhite(canvas), 'image/jpeg', 0.92) : shot.photo;
+  status('Caption copied: paste it into the post · คัดลอกข้อความแล้ว วางในโพสต์');
+  share(new File([img], shot.name + '.jpg', { type: 'image/jpeg' }));
 }
 
 function fill(el, shot, canvas) {
@@ -284,17 +368,18 @@ function fill(el, shot, canvas) {
   stage.onclick = () => openZoom(canvas, stage.className);
   const meta = el.querySelector('.meta'); meta.className = 'meta';
   meta.textContent = `${canvas.width} × ${canvas.height} px, from a ${shot.W} × ${shot.H} photo · kept on this phone`;
-  const b = buttons(el);
+  const [b, m] = buttons(el);
+  b('🔍 Search · ค้นหา', () => search(shot), 'big');
+  b('📣 Post · โพสต์', () => post(shot, canvas), 'big');
+  b('฿ Price · ราคา', price);
   const backs = ['bg-check', 'bg-white', 'bg-black'];
-  b('Background · พื้น', () => { const i = (backs.indexOf(stage.classList[1]) + 1) % 3; stage.className = 'stage ' + backs[i]; });
-  b('Share · แชร์', async () => {
-    const f = new File([await blobOf(canvas, 'image/png')], shot.name + '.png', { type: 'image/png' });
-    if (navigator.canShare?.({ files: [f] })) navigator.share({ files: [f] }).catch(() => {}); else save(f, f.name);
-  }, 'big');
-  b('Save PNG', async () => save(await blobOf(canvas, 'image/png'), shot.name + '.png'));
-  b('Save on white', async () => save(await blobOf(onWhite(canvas), 'image/jpeg', 0.95), shot.name + '-white.jpg'));
-  b('Save original', () => save(shot.photo, shot.name + '-original.' + ext(shot)));
-  b('Remove · ลบ', () => drop(el, shot));
+  m('Background · พื้น', () => { const i = (backs.indexOf(stage.classList[1]) + 1) % 3; stage.className = 'stage ' + backs[i]; });
+  m('Share · แชร์', async () => share(new File([await blobOf(canvas, 'image/png')], shot.name + '.png', { type: 'image/png' })));
+  m('Save PNG', async () => save(await blobOf(canvas, 'image/png'), shot.name + '.png'));
+  m('Save on white', async () => save(await blobOf(onWhite(canvas), 'image/jpeg', 0.95), shot.name + '-white.jpg'));
+  m('Save original', () => save(shot.photo, shot.name + '-original.' + ext(shot)));
+  m('Remove · ลบ', () => drop(el, shot));
+  mark(shot);
 }
 
 // a kept photo with no cutout yet: show the photo itself, offer to cut it
@@ -303,18 +388,15 @@ function uncut(el, shot, note, bad) {
   const img = new Image(); img.src = URL.createObjectURL(shot.photo); img.alt = 'Amulet photo';
   stage.innerHTML = ''; stage.className = 'stage bg-black'; stage.onclick = null; stage.append(img);
   const meta = el.querySelector('.meta'); meta.textContent = note; meta.className = bad ? 'meta err' : 'meta';
-  const b = buttons(el);
-  b('Cut · ตัด', () => { meta.textContent = 'Cutting… · กำลังตัด…'; meta.className = 'meta'; cut(el, shot); }, 'big');
-  b('Save original', () => save(shot.photo, shot.name + '-original.' + ext(shot)));
-  b('Remove · ลบ', () => drop(el, shot));
+  const [b, m] = buttons(el);
+  b('🔍 Search · ค้นหา', () => search(shot), 'big');
+  b('✂️ Cut · ตัด', () => { meta.textContent = 'Cutting… · กำลังตัด…'; meta.className = 'meta'; cut(el, shot); }, 'big');
+  b('📣 Post · โพสต์', () => post(shot));
+  b('฿ Price · ราคา', price);
+  m('Save original', () => save(shot.photo, shot.name + '-original.' + ext(shot)));
+  m('Remove · ลบ', () => drop(el, shot));
+  mark(shot);
 }
-
-function openZoom(c, cls) {
-  const z = $('#zoom'); z.querySelectorAll('canvas').forEach(x => x.remove());
-  const copy = canvasOf(c.width, c.height); copy.getContext('2d').drawImage(c, 0, 0);
-  z.className = cls.replace('stage', ''); z.append(copy); z.style.display = 'block';
-}
-$('#zoomClose').onclick = () => { $('#zoom').style.display = 'none'; };
 
 let queue = Promise.resolve();
 function cut(el, shot) {
@@ -328,7 +410,7 @@ function cut(el, shot) {
       shot.W = res.W; shot.H = res.H;
       fill(el, shot, res.canvas);
       status(`Cut in ${((performance.now() - t) / 1000).toFixed(1)} s`);
-      blobOf(res.canvas, 'image/png').then(png => { shot.cut = png; return keep(shot); }).catch(console.error);
+      blobOf(res.canvas, 'image/png').then(png => { shot.cut = png; return keep(shot); }).then(sync).catch(console.error);
     } catch (e) {
       console.error(e);
       uncut(el, shot, 'Could not cut this one: ' + (e.message || e) + ' · the photo is kept', true);
@@ -343,9 +425,10 @@ async function take(files) {
     // copy the bytes out of the picker first: the browser's handle on a camera file does not outlive the page
     const shot = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, t: Date.now(),
       name: `amulet-${s}${files.length > 1 ? '-' + (i + 1) : ''}`,
-      photo: new Blob([await f.arrayBuffer()], { type: f.type || 'image/jpeg' }), cut: null };
-    const el = card();
-    try { await keep(shot); }
+      photo: new Blob([await f.arrayBuffer()], { type: f.type || 'image/jpeg' }), cut: null, up: {} };
+    live.set(shot.id, shot);
+    const el = card(shot);
+    try { await keep(shot); sync(); }
     catch (e) { console.error(e); status('Could not keep this photo on the phone. Press Save original now. · บันทึกไม่ได้ กด Save original', 'err'); }
     cut(el, shot);
   }
@@ -359,7 +442,8 @@ for (const id of ['#shoot', '#pick']) $(id).onchange = e => { take([...e.target.
   if (!shots.length) return;
   shots.sort((a, b) => a.t - b.t);
   for (const shot of shots) {
-    const el = card();
+    live.set(shot.id, shot);
+    const el = card(shot);
     if (shot.cut) {
       const bmp = await createImageBitmap(shot.cut), c = canvasOf(bmp.width, bmp.height);
       c.getContext('2d').drawImage(bmp, 0, 0); bmp.close();
@@ -367,6 +451,7 @@ for (const id of ['#shoot', '#pick']) $(id).onchange = e => { take([...e.target.
     } else uncut(el, shot, 'Kept from last time, not cut yet · ยังไม่ได้ตัด');
   }
   status(`${shots.length} kept on this phone · เก็บไว้ ${shots.length} รูป`);
+  sync();
 })();
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
