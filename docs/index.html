@@ -37,7 +37,7 @@ input[type=file]{display:none}
 progress{width:100%;height:16px;accent-color:var(--gold)}
 .card{background:var(--panel);border:2px solid var(--line);border-radius:18px;padding:12px;margin:16px 0}
 .stage{border-radius:12px;overflow:hidden;display:flex;justify-content:center;align-items:center;min-height:200px;cursor:zoom-in}
-.stage canvas{max-width:100%;max-height:70vh;display:block}
+.stage canvas,.stage img{max-width:100%;max-height:70vh;display:block}
 .bg-check{background:repeating-conic-gradient(#888 0 25%,#bbb 0 50%) 0 0/24px 24px}
 .bg-white{background:#fff}.bg-black{background:#000}
 .meta{color:var(--dim);font-size:17px;margin:8px 2px}
@@ -69,6 +69,7 @@ summary{cursor:pointer;color:var(--ink);font-weight:700}
 <summary>Sharper pictures · ถ่ายให้ชัด</summary>
 <p>Plain sheet behind the amulet, a colour unlike it. Daylight from a window, flash off. Hold the phone 10–15 cm away, or use the camera's macro or 2× lens and fill the frame. Tap the amulet on the screen to focus, then wait a second before the shot.</p>
 <p>The first cutout downloads the cutting model (about 45 MB) once; Wi‑Fi helps.</p>
+<p>Every photo stays on this phone, in the app, until you press Remove. ทุกรูปเก็บไว้ในเครื่องจนกว่าจะกดลบ</p>
 </details>
 </main>
 
@@ -238,32 +239,74 @@ function onWhite(c) { const w = canvasOf(c.width, c.height), x = w.getContext('2
 function save(blob, name) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); }
 const stamp = () => new Date().toISOString().replace(/[-:]/g, '').slice(0, 15).replace('T', '-');
 
-function card(file) {
+// every photo is written to the phone's own storage the moment it arrives, before any cutting,
+// so a crash or a closed tab loses nothing; it stays until Remove
+const DB = new Promise((ok, no) => {
+  const r = indexedDB.open('amulet-camera', 1);
+  r.onupgradeneeded = () => r.result.createObjectStore('shots', { keyPath: 'id' });
+  r.onsuccess = () => ok(r.result); r.onerror = () => no(r.error);
+});
+async function tx(mode, fn) {
+  const db = await DB;
+  return new Promise((ok, no) => {
+    const t = db.transaction('shots', mode), r = fn(t.objectStore('shots'));
+    t.oncomplete = () => ok(r.result); t.onerror = () => no(t.error); t.onabort = () => no(t.error);
+  });
+}
+const keep = shot => tx('readwrite', s => s.put(shot));
+const forget = id => tx('readwrite', s => s.delete(id));
+const kept = () => tx('readonly', s => s.getAll());
+navigator.storage?.persist?.().catch(() => {});
+
+function card() {
   const el = document.createElement('div'); el.className = 'card';
   el.innerHTML = `<div class="stage bg-check"></div><div class="meta">Cutting… · กำลังตัด…</div>`;
   $('#out').prepend(el);
   return el;
 }
 
-function fill(el, file, res) {
-  const name = `amulet-${stamp()}`;
+function buttons(el) {
+  el.querySelector('.row')?.remove();
+  const row = document.createElement('div'); row.className = 'row'; el.append(row);
+  return (label, fn, cls = 'plain') => { const x = document.createElement('button'); x.type = 'button'; x.className = cls; x.textContent = label; x.onclick = fn; row.append(x); return x; };
+}
+const ext = shot => shot.photo.type.split('/')[1] || 'jpg';
+
+async function drop(el, shot) {
+  if (!confirm('Remove this photo from the phone? · ลบรูปนี้ออกจากเครื่อง?')) return;
+  await forget(shot.id).catch(console.error);
+  el.remove();
+}
+
+function fill(el, shot, canvas) {
   const stage = el.querySelector('.stage');
-  stage.innerHTML = ''; stage.append(res.canvas);
-  stage.onclick = () => openZoom(res.canvas, stage.className);
-  el.querySelector('.meta').textContent = `${res.canvas.width} × ${res.canvas.height} px, from a ${res.W} × ${res.H} photo`;
-  const row = document.createElement('div'); row.className = 'row';
-  const b = (label, fn, cls = 'plain') => { const x = document.createElement('button'); x.type = 'button'; x.className = cls; x.textContent = label; x.onclick = fn; row.append(x); return x; };
+  stage.innerHTML = ''; stage.append(canvas);
+  stage.onclick = () => openZoom(canvas, stage.className);
+  const meta = el.querySelector('.meta'); meta.className = 'meta';
+  meta.textContent = `${canvas.width} × ${canvas.height} px, from a ${shot.W} × ${shot.H} photo · kept on this phone`;
+  const b = buttons(el);
   const backs = ['bg-check', 'bg-white', 'bg-black'];
   b('Background · พื้น', () => { const i = (backs.indexOf(stage.classList[1]) + 1) % 3; stage.className = 'stage ' + backs[i]; });
   b('Share · แชร์', async () => {
-    const f = new File([await blobOf(res.canvas, 'image/png')], name + '.png', { type: 'image/png' });
+    const f = new File([await blobOf(canvas, 'image/png')], shot.name + '.png', { type: 'image/png' });
     if (navigator.canShare?.({ files: [f] })) navigator.share({ files: [f] }).catch(() => {}); else save(f, f.name);
   }, 'big');
-  b('Save PNG', async () => save(await blobOf(res.canvas, 'image/png'), name + '.png'));
-  b('Save on white', async () => save(await blobOf(onWhite(res.canvas), 'image/jpeg', 0.95), name + '-white.jpg'));
-  b('Save original', () => save(file, name + '-original.' + (file.type.split('/')[1] || 'jpg')));
-  b('Remove · ลบ', () => el.remove());
-  el.append(row);
+  b('Save PNG', async () => save(await blobOf(canvas, 'image/png'), shot.name + '.png'));
+  b('Save on white', async () => save(await blobOf(onWhite(canvas), 'image/jpeg', 0.95), shot.name + '-white.jpg'));
+  b('Save original', () => save(shot.photo, shot.name + '-original.' + ext(shot)));
+  b('Remove · ลบ', () => drop(el, shot));
+}
+
+// a kept photo with no cutout yet: show the photo itself, offer to cut it
+function uncut(el, shot, note, bad) {
+  const stage = el.querySelector('.stage');
+  const img = new Image(); img.src = URL.createObjectURL(shot.photo); img.alt = 'Amulet photo';
+  stage.innerHTML = ''; stage.className = 'stage bg-black'; stage.onclick = null; stage.append(img);
+  const meta = el.querySelector('.meta'); meta.textContent = note; meta.className = bad ? 'meta err' : 'meta';
+  const b = buttons(el);
+  b('Cut · ตัด', () => { meta.textContent = 'Cutting… · กำลังตัด…'; meta.className = 'meta'; cut(el, shot); }, 'big');
+  b('Save original', () => save(shot.photo, shot.name + '-original.' + ext(shot)));
+  b('Remove · ลบ', () => drop(el, shot));
 }
 
 function openZoom(c, cls) {
@@ -274,28 +317,57 @@ function openZoom(c, cls) {
 $('#zoomClose').onclick = () => { $('#zoom').style.display = 'none'; };
 
 let queue = Promise.resolve();
-function take(files) {
-  for (const f of files) {
-    const el = card(f);
-    queue = queue.then(async () => {
-      try {
-        if (!model) status('Loading the cutting model · กำลังโหลด…');
-        await load();
-        status(`Cutting · ${model._dev === 'webgpu' ? 'GPU' : 'CPU'}`);
-        const t = performance.now();
-        const res = await cutout(f);
-        fill(el, f, res);
-        status(`Cut in ${((performance.now() - t) / 1000).toFixed(1)} s`);
-      } catch (e) {
-        console.error(e);
-        el.querySelector('.meta').textContent = 'Could not cut this one: ' + (e.message || e);
-        el.querySelector('.meta').className = 'meta err';
-        status('');
-      }
-    });
+function cut(el, shot) {
+  queue = queue.then(async () => {
+    try {
+      if (!model) status('Loading the cutting model · กำลังโหลด…');
+      await load();
+      status(`Cutting · ${model._dev === 'webgpu' ? 'GPU' : 'CPU'}`);
+      const t = performance.now();
+      const res = await cutout(shot.photo);
+      shot.W = res.W; shot.H = res.H;
+      fill(el, shot, res.canvas);
+      status(`Cut in ${((performance.now() - t) / 1000).toFixed(1)} s`);
+      blobOf(res.canvas, 'image/png').then(png => { shot.cut = png; return keep(shot); }).catch(console.error);
+    } catch (e) {
+      console.error(e);
+      uncut(el, shot, 'Could not cut this one: ' + (e.message || e) + ' · the photo is kept', true);
+      status('');
+    }
+  });
+}
+
+async function take(files) {
+  const s = stamp();
+  for (const [i, f] of files.entries()) {
+    // copy the bytes out of the picker first: the browser's handle on a camera file does not outlive the page
+    const shot = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, t: Date.now(),
+      name: `amulet-${s}${files.length > 1 ? '-' + (i + 1) : ''}`,
+      photo: new Blob([await f.arrayBuffer()], { type: f.type || 'image/jpeg' }), cut: null };
+    const el = card();
+    try { await keep(shot); }
+    catch (e) { console.error(e); status('Could not keep this photo on the phone. Press Save original now. · บันทึกไม่ได้ กด Save original', 'err'); }
+    cut(el, shot);
   }
 }
 for (const id of ['#shoot', '#pick']) $(id).onchange = e => { take([...e.target.files]); e.target.value = ''; };
+
+// bring back everything kept from before: cut ones as cutouts, the rest as photos with a Cut button
+(async () => {
+  let shots;
+  try { shots = await kept(); } catch (e) { console.warn(e); return; }
+  if (!shots.length) return;
+  shots.sort((a, b) => a.t - b.t);
+  for (const shot of shots) {
+    const el = card();
+    if (shot.cut) {
+      const bmp = await createImageBitmap(shot.cut), c = canvasOf(bmp.width, bmp.height);
+      c.getContext('2d').drawImage(bmp, 0, 0); bmp.close();
+      fill(el, shot, c);
+    } else uncut(el, shot, 'Kept from last time, not cut yet · ยังไม่ได้ตัด');
+  }
+  status(`${shots.length} kept on this phone · เก็บไว้ ${shots.length} รูป`);
+})();
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 window.__take = take; // test hook
