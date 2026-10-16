@@ -16,5 +16,5 @@ How it cuts: ISNet (onnx-community/ISNet-ONNX, licence AGPL-3.0) runs in the pho
 
 Tested 2026-10-12 on her vivo X300 FE amulet photos: 1.4 s a photo on a Mac GPU (also with the GPU held to a phone's 8-buffer limit), about 15 s on the Mac CPU.
 
-Code: MIT. Files: docs/index.html (the app), docs/sw.js (offline shell), docs/manifest.webmanifest, docs/icon-*.png.
+Code: MIT. Files: docs/index.html (the app), docs/cutout.mjs (the cutter, shared), docs/cut.html (the cutter for sites.motdang.net's builder, which frames it: a photo in by postMessage, the cutout on white back; only sites.motdang.net and the local builder may ask), docs/sw.js (offline shell), docs/manifest.webmanifest, docs/icon-*.png.
 Local preview: python3 -m http.server 8961 --directory docs
