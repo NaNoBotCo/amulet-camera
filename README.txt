@@ -2,6 +2,8 @@ Amulet Camera · กล้องพระ
 
 A phone web app: take or choose a photo of a small amulet, and it cuts the amulet out from its background at the photo's full resolution. Share, save as transparent PNG, save on white, or save the original.
 
+Every photo is written to the phone's own storage (IndexedDB, in the browser) the moment it is taken or chosen, before any cutting, and its cutout is added once made. Reopening the app brings them all back; a photo leaves only on Remove. Added 2026-10-16 after a crash lost 10 photos.
+
 Live: https://nanobotco.github.io/amulet-camera/
 On the vivo: open that link in Chrome, menu ⋮, Add to home screen.
 
