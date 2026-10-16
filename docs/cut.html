@@ -11,7 +11,7 @@
 // model and its library off the builder's origin). A photo comes in by postMessage; the amulet cut
 // out and laid on white comes back as a JPEG.
 //   in:  { type: 'cut', id, blob }
-//   out: { type: 'ready' } · { type: 'progress', loaded, total } · { type: 'done', id, blob, w, h, dev } · { type: 'fail', id, error }
+//   out: { type: 'progress', loaded, total } · { type: 'done', id, blob, w, h, dev } · { type: 'fail', id, error }
 import { load, cutout, device } from './cutout.mjs';
 
 const PARENTS = ['https://sites.motdang.net', 'http://127.0.0.1:8790', 'http://localhost:8790', 'https://amulet.test'];
@@ -37,7 +37,6 @@ addEventListener('message', e => {
     }
   });
 });
-for (const o of PARENTS) try { parent.postMessage({ type: 'ready' }, o); } catch {}
 </script>
 </body>
 </html>
