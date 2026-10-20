@@ -72,7 +72,7 @@ summary{cursor:pointer;color:var(--ink);font-weight:700}
 <summary>Sharper pictures · ถ่ายให้ชัด</summary>
 <p>Plain sheet behind the amulet, a colour unlike it. Daylight from a window, flash off. Hold the phone 10–15 cm away, or use the camera's macro or 2× lens and fill the frame. Tap the amulet on the screen to focus, then wait a second before the shot.</p>
 <p>The first cutout downloads the cutting model (about 45 MB) once; Wi‑Fi helps.</p>
-<p>Every photo stays on this phone, in the app, until you press Remove. ทุกรูปเก็บไว้ในเครื่องจนกว่าจะกดลบ</p>
+<p>The app keeps every photo until you press Remove. แอปเก็บทุกรูปไว้จนกว่าจะกดลบ</p>
 </details>
 </main>
 
@@ -193,10 +193,10 @@ async function search(shot) {
   } catch (e) { console.warn(e); w?.close(); status('Search needs a signal · ต้องใช้เน็ต', 'err'); }
 }
 
-// Price: eBay sold listings for the words she gives
+// Price: Mot Dang's price guide (closed G-Pra auctions, Lazada asking prices) for the words she gives
 function price() {
-  const words = prompt('Price check on eBay sold listings. Words? · คำค้นหา\ne.g. luang phor thuad', '');
-  if (words) open('https://www.ebay.com/sch/i.html?' + new URLSearchParams({ _nkw: 'thai amulet ' + words, LH_Sold: 1, LH_Complete: 1 }), '_blank');
+  const words = prompt('ราคากลาง · Price guide\nพระอะไร วัดไหน ปีอะไร? · Which amulet, temple, year?\ne.g. หลวงพ่อคูณ วัดบ้านไร่ 2536', '');
+  if (words) open('https://sites.motdang.net/amulet-price?' + new URLSearchParams({ q: words }), '_blank');
 }
 
 // Post: the picture on white to the share sheet (Facebook, then the group), caption on the clipboard
