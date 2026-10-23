@@ -46,6 +46,8 @@ progress{width:100%;height:16px;accent-color:var(--gold)}
 .cloud{margin-top:0}
 .more{margin:12px 2px 0}
 .more .row{margin-top:12px}
+.tolh{color:var(--dim);font-size:17px;margin:16px 2px 0}
+.card .tolrow button{flex:1 1 0;padding:12px 4px;font-size:18px}
 #zoom{position:fixed;inset:0;background:#000;display:none;overflow:auto;z-index:9;touch-action:pan-x pan-y pinch-zoom}
 #zoom canvas{display:block;max-width:none}
 #zoom button{position:fixed;top:12px;right:12px;background:var(--gold);color:#000}
@@ -79,7 +81,7 @@ summary{cursor:pointer;color:var(--ink);font-weight:700}
 <div id="zoom"><button type="button" id="zoomClose">✕ Close</button></div>
 
 <script type="module">
-import { load, cutout, device } from './cutout.mjs';
+import { load, cutout, recut, device, LEVELS, DEFAULT_LEVEL } from './cutout.mjs';
 const $ = s => document.querySelector(s);
 const status = (t, cls) => { $('#status').textContent = t; $('#status').className = cls || ''; };
 const bar = $('#bar');
@@ -129,6 +131,7 @@ async function put(shot, part) {
   const r = await fetch(`${CLOUD}/p/${shot.id}/${part}`, { method: 'PUT', body,
     headers: { 'X-Key': cloudKey(), 'Content-Type': body.type, 'X-Name': shot.name } });
   if (!r.ok) throw new Error('cloud ' + r.status);
+  if (part === 'cut' && shot.cut !== body) return;     // cut again while this went up: the new cutout is still to send
   shot.up = { ...shot.up, [part]: true };
   await keep(shot); mark(shot);
 }
@@ -227,7 +230,22 @@ function fill(el, shot, canvas) {
   m('Save on white', async () => save(await blobOf(onWhite(canvas), 'image/jpeg', 0.95), shot.name + '-white.jpg'));
   m('Save original', () => save(shot.photo, shot.name + '-original.' + ext(shot)));
   m('Remove · ลบ', () => drop(el, shot));
+  tolerance(el, shot);
   mark(shot);
+}
+
+// Tolerance: how readily a doubtful part of the photo counts as the amulet. A new level recuts from the
+// model's kept answer with no model run; a cut kept from an earlier version cuts afresh.
+function tolerance(el, shot) {
+  const box = document.createElement('div');
+  box.innerHTML = '<div class="tolh">Tolerance · ความผ่อนปรน</div><div class="row tolrow"></div>';
+  LEVELS.forEach((L, i) => {
+    const x = document.createElement('button'); x.type = 'button'; x.className = 'plain'; x.textContent = `${L.en} · ${L.th}`;
+    x.setAttribute('aria-pressed', shot.tol === i);
+    x.onclick = () => { if (!el.pending && shot.tol === i) return; el.querySelector('.meta').textContent = 'Cutting… · กำลังตัด…'; cut(el, shot, i); };
+    box.querySelector('.tolrow').append(x);
+  });
+  el.querySelector('.more').append(box);
 }
 
 // a kept photo with no cutout yet: show the photo itself, offer to cut it
@@ -247,24 +265,34 @@ function uncut(el, shot, note, bad) {
 }
 
 let queue = Promise.resolve();
-function cut(el, shot) {
+function cut(el, shot, level = shot.tol ?? DEFAULT_LEVEL) {
+  el.pending = (el.pending || 0) + 1;      // cuts queued or running for this card: a tap on the shown level still counts while any are
   queue = queue.then(async () => {
     try {
-      if (!device()) status('Loading the cutting model · กำลังโหลด…');
-      await load((l, t) => { bar.hidden = false; bar.max = t; bar.value = l; status(`Getting the cutting model · ${Math.round(l / 1e6)} of ${Math.round(t / 1e6)} MB`); });
-      bar.hidden = true;
-      status(`Cutting · ${device() === 'webgpu' ? 'GPU' : 'CPU'}`);
+      const fresh = !shot.mask;      // no model answer kept yet: the model runs
+      if (fresh) {
+        if (!device()) status('Loading the cutting model · กำลังโหลด…');
+        await load((l, t) => { bar.hidden = false; bar.max = t; bar.value = l; status(`Getting the cutting model · ${Math.round(l / 1e6)} of ${Math.round(t / 1e6)} MB`); });
+        bar.hidden = true;
+      }
+      status(fresh ? `Cutting · ${device() === 'webgpu' ? 'GPU' : 'CPU'}` : 'Cutting · กำลังตัด');
       const t = performance.now();
-      const res = await cutout(shot.photo);
-      shot.W = res.W; shot.H = res.H;
+      const res = fresh ? await cutout(shot.photo, level) : await recut(shot.photo, shot.mask, level);
+      shot.W = res.W; shot.H = res.H; shot.tol = level;
+      if (res.mask) shot.mask = res.mask;
       fill(el, shot, res.canvas);
       status(`Cut in ${((performance.now() - t) / 1000).toFixed(1)} s`);
-      blobOf(res.canvas, 'image/png').then(png => { shot.cut = png; return keep(shot); }).then(sync).catch(console.error);
+      // the PNG and the record are saved inside this task, so the next queued cut starts after them and a quick
+      // second tap cannot leave a saved cutout that disagrees with shot.tol
+      try {
+        shot.cut = await blobOf(res.canvas, 'image/png'); shot.up = { ...shot.up, cut: false };
+        await keep(shot); sync();
+      } catch (e) { console.error(e); }
     } catch (e) {
       console.error(e);
       uncut(el, shot, 'Could not cut this one: ' + (e.message || e) + ' · the photo is kept', true);
       status('');
-    }
+    } finally { el.pending--; }
   });
 }
 
