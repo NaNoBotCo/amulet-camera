@@ -131,6 +131,7 @@ async function put(shot, part) {
   const r = await fetch(`${CLOUD}/p/${shot.id}/${part}`, { method: 'PUT', body,
     headers: { 'X-Key': cloudKey(), 'Content-Type': body.type, 'X-Name': shot.name } });
   if (!r.ok) throw new Error('cloud ' + r.status);
+  if (part === 'cut' && shot.cut !== body) return;     // cut again while this went up: the new cutout is still to send
   shot.up = { ...shot.up, [part]: true };
   await keep(shot); mark(shot);
 }
@@ -241,7 +242,7 @@ function tolerance(el, shot) {
   LEVELS.forEach((L, i) => {
     const x = document.createElement('button'); x.type = 'button'; x.className = 'plain'; x.textContent = `${L.en} · ${L.th}`;
     x.setAttribute('aria-pressed', shot.tol === i);
-    x.onclick = () => { if (shot.tol === i) return; el.querySelector('.meta').textContent = 'Cutting… · กำลังตัด…'; cut(el, shot, i); };
+    x.onclick = () => { if (!el.pending && shot.tol === i) return; el.querySelector('.meta').textContent = 'Cutting… · กำลังตัด…'; cut(el, shot, i); };
     box.querySelector('.tolrow').append(x);
   });
   el.querySelector('.more').append(box);
@@ -265,6 +266,7 @@ function uncut(el, shot, note, bad) {
 
 let queue = Promise.resolve();
 function cut(el, shot, level = shot.tol ?? DEFAULT_LEVEL) {
+  el.pending = (el.pending || 0) + 1;      // cuts queued or running for this card: a tap on the shown level still counts while any are
   queue = queue.then(async () => {
     try {
       const fresh = !shot.mask;      // no model answer kept yet: the model runs
@@ -280,12 +282,17 @@ function cut(el, shot, level = shot.tol ?? DEFAULT_LEVEL) {
       if (res.mask) shot.mask = res.mask;
       fill(el, shot, res.canvas);
       status(`Cut in ${((performance.now() - t) / 1000).toFixed(1)} s`);
-      blobOf(res.canvas, 'image/png').then(png => { shot.cut = png; shot.up = { ...shot.up, cut: false }; return keep(shot); }).then(sync).catch(console.error);
+      // the PNG and the record are saved inside this task, so the next queued cut starts after them and a quick
+      // second tap cannot leave a saved cutout that disagrees with shot.tol
+      try {
+        shot.cut = await blobOf(res.canvas, 'image/png'); shot.up = { ...shot.up, cut: false };
+        await keep(shot); sync();
+      } catch (e) { console.error(e); }
     } catch (e) {
       console.error(e);
       uncut(el, shot, 'Could not cut this one: ' + (e.message || e) + ' · the photo is kept', true);
       status('');
-    }
+    } finally { el.pending--; }
   });
 }
 

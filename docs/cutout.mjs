@@ -11,11 +11,15 @@ const REFINE_MAX = 2048;    // guided filter works at most this many px on the l
 export const LEVELS = [
   { en: 'Strict', th: 'เข้ม', lo: 0.25, hi: 0.75, gap: 2 },
   { en: 'Normal', th: 'ปกติ', lo: 0.05, hi: 0.40, gap: 0.15 },
-  { en: 'Forgiving', th: 'ผ่อนปรน', lo: 0.02, hi: 0.22, gap: 0.04 },
+  { en: 'Forgiving', th: 'ผ่อนปรน', lo: 0.02, hi: 0.22, gap: 0.10 },
 ];
 export const DEFAULT_LEVEL = 2;                   // Forgiving: her word 2026-10-23, "tolerances need to be more tolerant"
 const GAP_MAX = 0.04;       // the largest gap filled, as a share of the amulet's area
 const PIECE_MIN = 0.015;    // a piece smaller than this share of the largest piece is dropped
+// The crop is cut once and `recut` reuses it at every level, so it is wide enough for the most forgiving level:
+// the sure extent (rated over 0.5) plus whatever rated over the lowest `lo` joins it within REACH px.
+const CROP_LO = Math.min(...LEVELS.map(L => L.lo));
+const REACH = Math.round(0.04 * SIZE);
 
 let tf, model, loading, gpuFailed = false;
 export const device = () => model?._dev;
@@ -58,11 +62,23 @@ async function predict(canvas) {
 
 function canvasOf(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
 
-// bounding box of alpha > t on an n×n grid, null if empty
-function bbox(a, n, t = 0.5) {
-  let x0 = n, y0 = n, x1 = -1, y1 = -1;
-  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) if (a[y * n + x] > t) {
+// bounding box, on an n×n grid, of every pixel rated over `sure` plus every pixel rated over `lo` that joins
+// them within `reach` px: a faint part of the amulet falls inside, a faint patch far off does not. null if
+// nothing is rated over `sure`
+function extent(a, n, sure, lo, reach) {
+  const N = n * n, d = new Int16Array(N).fill(-1), q = new Int32Array(N);
+  let head = 0, tail = 0, x0 = n, y0 = n, x1 = -1, y1 = -1;
+  for (let i = 0; i < N; i++) if (a[i] > sure) { d[i] = 0; q[tail++] = i; }
+  while (head < tail) {
+    const i = q[head++], x = i % n, y = (i - x) / n;
     if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+    if (d[i] >= reach) continue;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const nx = x + dx, ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+      const j = ny * n + nx;
+      if (d[j] < 0 && a[j] > lo) { d[j] = d[i] + 1; q[tail++] = j; }
+    }
   }
   return x1 < 0 ? null : { x0, y0, x1: x1 + 1, y1: y1 + 1 };
 }
@@ -151,8 +167,9 @@ function forgive(a, n, L) {
   const p = regions(whole, n, n, true), near = new Float32Array(N);
   let big = 0; for (const a of p.area) if (a > big) big = a;
   for (let i = 0; i < N; i++) if (whole[i] && p.area[p.lab[i]] >= PIECE_MIN * big) near[i] = 1;
+  for (let i = 0; i < N; i++) if (whole[i] && !near[i]) s[i] = 0;    // a dropped piece stays dropped beside a kept one
   const rim = box(near, n, n, 4);
-  for (let i = 0; i < N; i++) s[i] = rim[i] > 0 ? Math.max(s[i], near[i] * whole[i] * (1 - core[i])) : 0;
+  for (let i = 0; i < N; i++) s[i] = rim[i] > 0 ? Math.max(s[i], near[i] * (1 - core[i])) : 0;
   return s;
 }
 
@@ -177,7 +194,7 @@ export async function cutout(file, level = DEFAULT_LEVEL) {
   // pass 1: whole frame, to find the amulet
   const c1 = canvasOf(SIZE, SIZE); c1.getContext('2d').drawImage(bmp, 0, 0, SIZE, SIZE);
   const a1 = await predict(c1);
-  const b = bbox(a1, SIZE);
+  const b = extent(a1, SIZE, 0.5, CROP_LO, REACH);
   if (!b) throw new Error('No object found in this picture.');
 
   // crop around it with a margin, in full-resolution pixels
